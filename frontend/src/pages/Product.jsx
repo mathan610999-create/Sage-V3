@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import axios from 'axios'
 import { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts'
 
-const API = 'http://localhost:8000'
+const API = 'https://sage-v3-production.up.railway.app'
 const COLORS = ['#7F77DD','#C8A8E9','#F9C4D2','#D4537E','#AFA9EC','#534AB7']
 
 function fmt(v) {

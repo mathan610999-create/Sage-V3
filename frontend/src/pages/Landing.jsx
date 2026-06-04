@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react'
 import axios from 'axios'
 
-const API = 'http://localhost:8000'
+const API = 'https://sage-v3-production.up.railway.app'
 
 export default function Landing({ onSessionStart }) {
   const [uploading, setUploading] = useState(false)
