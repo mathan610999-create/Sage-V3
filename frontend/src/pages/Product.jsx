@@ -362,6 +362,7 @@ export default function Product({ session, onReset }) {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [voiceState, setVoiceState] = useState('idle')
+  const [pendingAudio, setPendingAudio] = useState(null)
   const [transcript, setTranscript] = useState('')
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
@@ -421,9 +422,8 @@ export default function Product({ session, onReset }) {
       setVoiceState('speaking')
       const { data: audio } = await axios.post(`${API}/speak`, { text: r.answer.slice(0, 500) })
       if (audio.audio) {
-        const sound = new Audio(`data:audio/mp3;base64,${audio.audio}`)
-        sound.onended = () => setVoiceState('idle')
-        sound.play()
+        setPendingAudio(audio.audio)
+        setVoiceState('idle')
       } else { setVoiceState('idle') }
       setTranscript('')
     } catch(e) { setVoiceState('idle') }
@@ -522,6 +522,18 @@ export default function Product({ session, onReset }) {
               )}
               <div ref={bottomRef} />
             </div>
+            {pendingAudio && (
+              <button
+                onClick={() => {
+                  const sound = new Audio(`data:audio/mp3;base64,${pendingAudio}`)
+                  sound.play()
+                  setPendingAudio(null)
+                }}
+                className="self-start flex items-center gap-2 px-4 py-2 rounded-full bg-gradient-to-r from-sage-200 to-rose-sage text-sage-600 text-sm animate-pulse"
+              >
+                🔊 Tap to hear Sage's answer
+              </button>
+            )}
             {transcript && (
               <div className="text-xs text-sage-400 px-2 flex items-center gap-1">
                 <span>🎤</span><span>"{transcript}"</span>
