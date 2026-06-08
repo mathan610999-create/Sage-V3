@@ -66,17 +66,25 @@ def speak(text: str) -> Optional[str]:
     """Convert text to speech via ElevenLabs. Returns base64 audio string."""
     try:
         from elevenlabs.client import ElevenLabs
-        client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+        key = ELEVENLABS_API_KEY
+        voice_id = ELEVENLABS_VOICE_ID
+        if not key or not voice_id:
+            print(f"ElevenLabs missing: key={bool(key)} voice_id={bool(voice_id)}")
+            return None
+        client = ElevenLabs(api_key=key)
         clean_text = _strip_markdown(text)
+        print(f"Speaking: {clean_text[:50]}")
         audio = client.text_to_speech.convert(
-            voice_id=ELEVENLABS_VOICE_ID,
+            voice_id=voice_id,
             text=clean_text,
             model_id="eleven_turbo_v2",
             output_format="mp3_44100_128",
         )
         audio_bytes = b"".join(audio)
+        print(f"Audio bytes: {len(audio_bytes)}")
         return base64.b64encode(audio_bytes).decode("utf-8")
     except Exception as e:
+        print(f"ElevenLabs error: {e}")
         return None
 
 def speak_thinking() -> Optional[str]:
