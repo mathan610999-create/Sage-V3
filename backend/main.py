@@ -120,16 +120,9 @@ class SpeakRequest(BaseModel):
 async def speak_text(req: SpeakRequest):
     try:
         from voice import speak
-        import os
-        key = os.getenv("ELEVENLABS_API_KEY")
-        voice_id = os.getenv("ELEVENLABS_VOICE_ID")
-        if not key:
-            raise HTTPException(500, "ELEVENLABS_API_KEY not set")
-        if not voice_id:
-            raise HTTPException(500, "ELEVENLABS_VOICE_ID not set")
         audio_b64 = speak(req.text)
         if not audio_b64:
-            raise HTTPException(500, "ElevenLabs returned no audio")
+            raise HTTPException(500, "TTS returned no audio")
         return {"audio": audio_b64}
     except HTTPException:
         raise
