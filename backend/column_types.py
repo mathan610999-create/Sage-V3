@@ -33,6 +33,12 @@ def classify_column(s: pd.Series) -> str:
         id_words = ["number", "code", "key", "index"]
         if any(w in name for w in id_words) and nunique >= 0.5 * n:
             return "id"
+        # 1d. Location/label identifiers — these tag a record (which room,
+        #     which class label) rather than measure it, regardless of how
+        #     many distinct values repeat (e.g. "Room Number", "Label")
+        id_name_words = ["room", "bed", "ward", "label"]
+        if any(w in name for w in id_name_words):
+            return "id"
 
         # ── Metric protection: additive business columns skip rate/ordinal checks ──
         if any(w in name for w in _METRIC_PROTECT_WORDS):
