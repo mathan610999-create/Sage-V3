@@ -2,6 +2,7 @@
 main.py — Sage FastAPI backend
 """
 from __future__ import annotations
+import asyncio
 import json
 import os
 import uuid
@@ -102,7 +103,7 @@ async def upload_dataset(file: UploadFile = File(...)):
 async def ask(req: AskRequest):
     try:
         session_id = req.session_id or str(uuid.uuid4())
-        result = run_agent_with_trace(req.question)
+        result = await asyncio.to_thread(run_agent_with_trace, req.question)
         return {
             "answer": result["content"],
             "session_id": session_id,
@@ -120,7 +121,7 @@ class SpeakRequest(BaseModel):
 async def speak_text(req: SpeakRequest):
     try:
         from voice import speak
-        audio_b64 = speak(req.text)
+        audio_b64 = await asyncio.to_thread(speak, req.text)
         if not audio_b64:
             raise HTTPException(500, "TTS returned no audio")
         return {"audio": audio_b64}
