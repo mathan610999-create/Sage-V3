@@ -155,6 +155,23 @@ def dashboard(session_id: str):
         "profile": session["profile"],
     }
 
+# ── Currency column detection ($ prefix only for money-like names) ──
+_CURRENCY_WORDS = {"price", "revenue", "sales", "income", "salary",
+                   "cost", "amount", "spend", "pay"}
+
+def _is_currency_col(col: str) -> bool:
+    name = col.lower()
+    return any(w in name for w in _CURRENCY_WORDS)
+
+def _fmt_total(total: float, col: str) -> str:
+    currency = _is_currency_col(col)
+    prefix = "$" if currency else ""
+    if total > 1_000_000:
+        return f"{prefix}{total/1_000_000:.1f}M"
+    if total > 1_000:
+        return f"{prefix}{total/1_000:.1f}K"
+    return f"{prefix}{total:.1f}"
+
 # ── Dashboard computed data ──
 @app.get("/dashboard-data/{session_id}")
 def dashboard_data(session_id: str):
@@ -173,20 +190,14 @@ def dashboard_data(session_id: str):
 
         result = {}
 
-        # 1. KPIs — total for metric, average for rate_or_score; id/constant excluded
+        # 1. KPIs — total for metric ($ only for currency cols), average for rate_or_score
         kpis = [{"label": "Rows", "value": f"{len(df):,}", "sub": f"{len(df.columns)} columns"}]
         for col in metric_cols[:3]:
             s = pd.to_numeric(df[col], errors="coerce").dropna()
             total = s.sum()
             avg = s.mean()
             label = col.replace("_", " ").title()
-            if total > 1000000:
-                val = f"${total/1000000:.1f}M" if any(k in col.lower() for k in ("sale", "revenue", "profit")) else f"{total/1000000:.1f}M"
-            elif total > 1000:
-                val = f"{total/1000:.1f}K"
-            else:
-                val = f"{total:.1f}"
-            kpis.append({"label": f"Total {label}", "value": val, "sub": f"avg {avg:,.0f}"})
+            kpis.append({"label": f"Total {label}", "value": _fmt_total(total, col), "sub": f"avg {avg:,.0f}"})
         for col in rate_cols[:2]:
             s = pd.to_numeric(df[col], errors="coerce").dropna()
             avg = s.mean()
@@ -290,24 +301,28 @@ def get_briefing(session_id: str):
         completeness = (1 - df.isnull().mean().mean())
         confidence = min(96, int(55 + completeness * 30 + min(len(df)/1000, 10)))
 
-        # Finding 1 — outliers in primary metric col only (not rate_or_score, not id)
+        # Finding 1 — outliers in primary metric col only; skip entirely when count == 0
         if metric_cols:
             col = next((c for c in metric_cols if any(k in c.lower() for k in ['sales','revenue','profit','amount'])), metric_cols[0])
             s = pd.to_numeric(df[col], errors="coerce").dropna()
             Q1, Q3 = s.quantile(0.25), s.quantile(0.75)
             IQR = Q3 - Q1
             outliers = s[(s < Q1 - 1.5*IQR) | (s > Q3 + 1.5*IQR)]
-            pct = len(outliers)/len(s)*100
             col_label = col.replace("_", " ").title()
-            findings.append({
-                "title": f"{pct:.1f}% outliers in {col_label}",
-                "detail": f"{len(outliers):,} of {len(s):,} records sit outside the normal range (IQR method). Mean is {s.mean():,.0f} vs median {s.median():,.0f} — a {s.mean()/max(s.median(),1):.1f}x gap.",
-                "type": "anomaly"
-            })
-            noticed.append(f"The mean {col_label} is {s.mean()/max(s.median(),1):.1f}x higher than the median — a small number of very large records are pulling the average up.")
-            # Risk card only when outliers actually exist
             if len(outliers) > 0:
-                risk = f"High concentration risk — {pct:.0f}% of {col_label} records are statistical outliers. If this group leaves, impact is outsized."
+                pct = len(outliers)/len(s)*100
+                findings.append({
+                    "title": f"{pct:.1f}% outliers in {col_label}",
+                    "detail": f"{len(outliers):,} of {len(s):,} records sit outside the normal range (IQR method). Mean is {s.mean():,.0f} vs median {s.median():,.0f} — a {s.mean()/max(s.median(),1):.1f}x gap.",
+                    "type": "anomaly"
+                })
+                risk = f"High concentration risk — {pct:.0f}% of {col_label} records are statistical outliers. These records drive a disproportionate share of the totals."
+            # Mean/median noticed: only when ratio diverges meaningfully
+            median = s.median()
+            if median != 0:
+                ratio = s.mean() / abs(median)
+                if ratio > 1.25 or ratio < 0.8:
+                    noticed.append(f"The mean {col_label} is {ratio:.1f}x the median — a skewed distribution that can distort averages.")
 
         # Finding 2 — category concentration (category only, not binary_outcome)
         if category_cols:
@@ -321,7 +336,11 @@ def get_briefing(session_id: str):
                 "type": "concentration"
             })
             noticed.append(f"{vc.index[0]} represents {top_pct:.0f}% of all {col_label} records.")
-            opportunity = f"{vc.index[-1]} represents {vc.iloc[-1]/len(df)*100:.1f}% of records."
+            # Opportunity only makes sense when there is a measurable metric to grow
+            if metric_cols:
+                opportunity = f"{vc.index[-1]} represents {vc.iloc[-1]/len(df)*100:.1f}% of records."
+            else:
+                noticed.append(f"{vc.index[-1]} is the smallest {col_label} segment at {vc.iloc[-1]/len(df)*100:.1f}% of records.")
 
         # Binary outcome — neutral split, no loaded language
         if binary_cols:
