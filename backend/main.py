@@ -163,36 +163,42 @@ def dashboard_data(session_id: str):
         if df is None:
             raise HTTPException(404, "No data loaded")
 
-        from tools import _classify_columns
-        classes = _classify_columns(df)
-        numeric_cols = classes.get("numeric", [])
-        categorical_cols = classes.get("categorical", [])
-        datetime_cols = classes.get("datetime", [])
+        from column_types import classify_column
+        col_types = {c: classify_column(df[c]) for c in df.columns}
+
+        metric_cols   = [c for c, t in col_types.items() if t == "metric"]
+        rate_cols     = [c for c, t in col_types.items() if t == "rate_or_score"]
+        category_cols = [c for c, t in col_types.items() if t in ("category", "binary_outcome")]
+        datetime_cols = [c for c, t in col_types.items() if t == "datetime"]
 
         result = {}
 
-        # 1. KPIs
+        # 1. KPIs — total for metric, average for rate_or_score; id/constant excluded
         kpis = [{"label": "Rows", "value": f"{len(df):,}", "sub": f"{len(df.columns)} columns"}]
-        for col in numeric_cols[:4]:
+        for col in metric_cols[:3]:
             s = pd.to_numeric(df[col], errors="coerce").dropna()
             total = s.sum()
             avg = s.mean()
             label = col.replace("_", " ").title()
             if total > 1000000:
-                val = f"${total/1000000:.1f}M" if "sale" in col.lower() or "revenue" in col.lower() or "profit" in col.lower() else f"{total/1000000:.1f}M"
+                val = f"${total/1000000:.1f}M" if any(k in col.lower() for k in ("sale", "revenue", "profit")) else f"{total/1000000:.1f}M"
             elif total > 1000:
                 val = f"{total/1000:.1f}K"
             else:
                 val = f"{total:.1f}"
             kpis.append({"label": f"Total {label}", "value": val, "sub": f"avg {avg:,.0f}"})
+        for col in rate_cols[:2]:
+            s = pd.to_numeric(df[col], errors="coerce").dropna()
+            avg = s.mean()
+            label = col.replace("_", " ").title()
+            kpis.append({"label": f"Avg {label}", "value": f"{avg:.1f}", "sub": f"{len(s):,} records"})
         result["kpis"] = kpis[:5]
 
-        # 2. Time series (line chart)
-        if datetime_cols and numeric_cols:
+        # 2. Time series — metric cols only (rate_or_score not summed over time)
+        if datetime_cols and metric_cols:
             date_col = datetime_cols[0]
-            # Prefer revenue/sales/profit columns for time series
-            preferred = ['total_sales', 'revenue', 'sales', 'total_revenue', 'amount', 'value']
-            metric = next((c for c in numeric_cols if c.lower() in preferred), numeric_cols[0])
+            preferred = ["total_sales", "revenue", "sales", "total_revenue", "amount", "value"]
+            metric = next((c for c in metric_cols if c.lower() in preferred), metric_cols[0])
             try:
                 ts = df.copy()
                 ts[date_col] = pd.to_datetime(ts[date_col], errors="coerce")
@@ -207,9 +213,9 @@ def dashboard_data(session_id: str):
             except Exception:
                 pass
 
-        # 3. Donut charts for categorical columns
+        # 3. Donut charts — category + binary_outcome cols; id/constant excluded
         donuts = []
-        for col in categorical_cols[:4]:
+        for col in category_cols[:4]:
             vc = df[col].value_counts(dropna=True).head(6).reset_index()
             vc.columns = ["name", "value"]
             donuts.append({
@@ -218,9 +224,9 @@ def dashboard_data(session_id: str):
             })
         result["donuts"] = donuts
 
-        # 4. Histograms for numeric columns
+        # 4. Histograms — metric + rate_or_score cols; id/constant excluded
         histograms = []
-        for col in numeric_cols[:3]:
+        for col in (metric_cols + rate_cols)[:3]:
             s = pd.to_numeric(df[col], errors="coerce").dropna()
             counts, bins = pd.cut(s, bins=20, retbins=True)
             hist_data = counts.value_counts(sort=False).reset_index()
@@ -232,15 +238,23 @@ def dashboard_data(session_id: str):
             })
         result["histograms"] = histograms
 
-        # 5. Top N bar charts
+        # 5. Bar charts — SUM for metric, MEAN for rate_or_score
         bars = []
-        for cat_col in categorical_cols[:2]:
-            for num_col in numeric_cols[:1]:
+        pure_category_cols = [c for c, t in col_types.items() if t == "category"]
+        for cat_col in pure_category_cols[:2]:
+            for num_col in metric_cols[:1]:
                 grp = df.groupby(cat_col)[num_col].sum().sort_values(ascending=False).head(6).reset_index()
                 grp.columns = ["name", "value"]
                 bars.append({
                     "title": f"Top {cat_col.replace('_',' ')} by {num_col.replace('_',' ')}",
                     "data": grp.to_dict("records")
+                })
+            for num_col in rate_cols[:1]:
+                grp = df.groupby(cat_col)[num_col].mean().sort_values(ascending=False).head(6).reset_index()
+                grp.columns = ["name", "value"]
+                bars.append({
+                    "title": f"Avg {num_col.replace('_',' ').title()} by {cat_col.replace('_',' ').title()}",
+                    "data": grp.round(2).to_dict("records")
                 })
         result["bars"] = bars
 
@@ -256,27 +270,29 @@ def get_briefing(session_id: str):
         if df is None:
             raise HTTPException(404, "No data loaded")
 
-        from tools import _classify_columns, build_profile
-        import numpy as np
+        from column_types import classify_column
 
-        classes = _classify_columns(df)
-        numeric_cols = classes.get("numeric", [])
-        categorical_cols = classes.get("categorical", [])
-        datetime_cols = classes.get("datetime", [])
+        col_types     = {c: classify_column(df[c]) for c in df.columns}
+        metric_cols   = [c for c, t in col_types.items() if t == "metric"]
+        rate_cols     = [c for c, t in col_types.items() if t == "rate_or_score"]
+        category_cols = [c for c, t in col_types.items() if t == "category"]
+        binary_cols   = [c for c, t in col_types.items() if t == "binary_outcome"]
+        datetime_cols = [c for c, t in col_types.items() if t == "datetime"]
+        corr_eligible = metric_cols + rate_cols  # valid pairs for action card
 
         findings = []
-        noticed = []
-        risk = ""
+        noticed  = []
+        risk        = ""
         opportunity = ""
-        action = ""
+        action      = ""
 
         # Confidence score
         completeness = (1 - df.isnull().mean().mean())
         confidence = min(96, int(55 + completeness * 30 + min(len(df)/1000, 10)))
 
-        # Finding 1 — outliers in primary numeric col
-        if numeric_cols:
-            col = next((c for c in numeric_cols if any(k in c.lower() for k in ['sales','revenue','profit','amount'])), numeric_cols[0])
+        # Finding 1 — outliers in primary metric col only (not rate_or_score, not id)
+        if metric_cols:
+            col = next((c for c in metric_cols if any(k in c.lower() for k in ['sales','revenue','profit','amount'])), metric_cols[0])
             s = pd.to_numeric(df[col], errors="coerce").dropna()
             Q1, Q3 = s.quantile(0.25), s.quantile(0.75)
             IQR = Q3 - Q1
@@ -288,28 +304,38 @@ def get_briefing(session_id: str):
                 "detail": f"{len(outliers):,} of {len(s):,} records sit outside the normal range (IQR method). Mean is {s.mean():,.0f} vs median {s.median():,.0f} — a {s.mean()/max(s.median(),1):.1f}x gap.",
                 "type": "anomaly"
             })
-            noticed.append(f"The mean {col_label} is {s.mean()/max(s.median(),1):.1f}x higher than the median — a small number of very large transactions are pulling the average up.")
-            risk = f"High concentration risk — {pct:.0f}% of {col_label} records are statistical outliers. If those accounts churn, impact is outsized."
+            noticed.append(f"The mean {col_label} is {s.mean()/max(s.median(),1):.1f}x higher than the median — a small number of very large records are pulling the average up.")
+            # Risk card only when outliers actually exist
+            if len(outliers) > 0:
+                risk = f"High concentration risk — {pct:.0f}% of {col_label} records are statistical outliers. If this group leaves, impact is outsized."
 
-        # Finding 2 — category concentration
-        if categorical_cols:
-            col = categorical_cols[0]
+        # Finding 2 — category concentration (category only, not binary_outcome)
+        if category_cols:
+            col = category_cols[0]
             vc = df[col].value_counts(dropna=True)
             top_pct = vc.iloc[0]/len(df)*100
             col_label = col.replace("_", " ").title()
             findings.append({
-                "title": f"{vc.index[0]} dominates {col_label} at {top_pct:.0f}%",
-                "detail": f"The top {col_label} accounts for {top_pct:.0f}% of all records. The bottom {len(vc)-1} categories share the remaining {100-top_pct:.0f}%.",
+                "title": f"{vc.index[0]} leads {col_label} at {top_pct:.0f}%",
+                "detail": f"The top {col_label} represents {top_pct:.0f}% of all records. The remaining {len(vc)-1} categories share {100-top_pct:.0f}%.",
                 "type": "concentration"
             })
-            noticed.append(f"{vc.index[0]} represents {top_pct:.0f}% of all {col_label} records — single-entity concentration that creates dependency risk.")
-            opportunity = f"{vc.index[-1]} is the smallest {col_label} at {vc.iloc[-1]/len(df)*100:.1f}% — potentially underdeveloped with room to grow."
+            noticed.append(f"{vc.index[0]} represents {top_pct:.0f}% of all {col_label} records.")
+            opportunity = f"{vc.index[-1]} represents {vc.iloc[-1]/len(df)*100:.1f}% of records."
 
-        # Finding 3 — time trend
-        if datetime_cols and numeric_cols:
+        # Binary outcome — neutral split, no loaded language
+        if binary_cols:
+            col = binary_cols[0]
+            vc = df[col].value_counts(dropna=True)
+            col_label = col.replace("_", " ").title()
+            parts = [f"{int(v):,} {k} ({v/len(df)*100:.0f}%)" for k, v in vc.items()]
+            noticed.append(f"{col_label}: {' / '.join(parts)}.")
+
+        # Finding 3 — time trend (metric cols only)
+        if datetime_cols and metric_cols:
             try:
                 date_col = datetime_cols[0]
-                metric = next((c for c in numeric_cols if any(k in c.lower() for k in ['sales','revenue','profit'])), numeric_cols[0])
+                metric = next((c for c in metric_cols if any(k in c.lower() for k in ['sales','revenue','profit'])), metric_cols[0])
                 ts = df.copy()
                 ts[date_col] = pd.to_datetime(ts[date_col], errors="coerce")
                 ts = ts.dropna(subset=[date_col]).set_index(date_col)[metric].resample("ME").sum()
@@ -329,8 +355,9 @@ def get_briefing(session_id: str):
             except Exception:
                 pass
 
-        if not action and numeric_cols:
-            action = f"Run a correlation analysis between {numeric_cols[0].replace('_',' ')} and {numeric_cols[1].replace('_',' ') if len(numeric_cols)>1 else 'other metrics'} to identify key drivers."
+        # Recommended action: only suggest correlations between metric/rate_or_score pairs
+        if not action and len(corr_eligible) >= 2:
+            action = f"Run a correlation analysis between {corr_eligible[0].replace('_',' ')} and {corr_eligible[1].replace('_',' ')} to identify key drivers."
 
         noticed.append(f"Dataset is {confidence}% complete with {len(df):,} rows and {len(df.columns)} columns — {'sufficient' if len(df) > 1000 else 'limited'} for reliable analysis.")
 
