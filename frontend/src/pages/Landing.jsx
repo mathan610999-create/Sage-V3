@@ -61,7 +61,7 @@ function Parallax({ children, strength = 1 }) {
   }
 
   return (
-    <div ref={ref} onMouseMove={handleMove} onMouseLeave={() => setOffset({ x: 0, y: 0 })} className="contents">
+    <div ref={ref} onMouseMove={handleMove} onMouseLeave={() => setOffset({ x: 0, y: 0 })}>
       {typeof children === 'function' ? children(offset) : children}
     </div>
   )
@@ -120,7 +120,7 @@ export default function Landing({ onSessionStart }) {
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-sage-200 to-sage-100 flex items-center justify-center text-lg shadow-sm">🌿</div>
           <div>
             <div className="text-sm font-semibold text-sage-700 leading-none">Sage</div>
-            <div className="text-[11px] text-sage-400 mt-0.5 hidden sm:block">Every dataset has a story. Sage tells it.</div>
+            <div className="text-[11px] text-sage-500 mt-0.5 hidden sm:block">Every dataset has a story. Sage tells it.</div>
           </div>
         </div>
         <div className="hidden md:flex items-center gap-7 text-sm text-sage-500">
@@ -167,7 +167,7 @@ export default function Landing({ onSessionStart }) {
               </span>
             </h1>
 
-            <p className="animate-fade-up text-sage-400 text-base md:text-lg mt-6 mb-10 max-w-xl leading-relaxed" style={{ animationDelay: '160ms' }}>
+            <p className="animate-fade-up text-sage-500 text-base md:text-lg mt-6 mb-10 max-w-xl leading-relaxed" style={{ animationDelay: '160ms' }}>
               Upload any dataset. Ask questions out loud. Hear the answers spoken back — with the reasoning behind them. No SQL, no dashboards, no training required.
             </p>
 
@@ -193,7 +193,11 @@ export default function Landing({ onSessionStart }) {
                 onDragOver={e => e.preventDefault()}
                 onDrop={e => { e.preventDefault(); handleFile(e.dataTransfer.files[0]) }}
                 onClick={() => inputRef.current?.click()}
-                className="mt-4 w-full max-w-md border-2 border-dashed border-sage-200 rounded-2xl p-8 cursor-pointer hover:border-sage-300 hover:bg-sage-50/60 transition text-center bg-white/40 backdrop-blur"
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); inputRef.current?.click() } }}
+                role="button"
+                tabIndex={0}
+                aria-label="Upload your dataset"
+                className="mt-4 w-full max-w-md border-2 border-dashed border-sage-200 rounded-2xl p-8 cursor-pointer hover:border-sage-300 hover:bg-sage-50/60 transition text-center bg-white/40 backdrop-blur focus:outline-none focus-visible:ring-2 focus-visible:ring-sage-400 focus-visible:ring-offset-2"
               >
                 <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-sage-200 to-sage-100 flex items-center justify-center text-2xl mx-auto mb-3">
                   {uploading ? '⏳' : '📊'}
@@ -201,13 +205,13 @@ export default function Landing({ onSessionStart }) {
                 <div className="text-sage-700 font-medium mb-1 text-sm">
                   {uploading ? 'Uploading & analyzing…' : 'Drop your dataset here, or click to browse'}
                 </div>
-                <div className="text-sage-300 text-xs">CSV or Excel · up to 200MB</div>
+                <div className="text-sage-500 text-xs">CSV or Excel · up to 200MB</div>
                 {error && <div className="text-[color:#c0392b] text-xs mt-2">{error}</div>}
               </div>
               <input ref={inputRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={e => handleFile(e.target.files[0])} />
 
               {/* Stat strip */}
-              <div className="flex flex-wrap justify-center gap-x-6 gap-y-2 mt-8 text-xs text-sage-400">
+              <div className="flex flex-wrap justify-center gap-x-6 gap-y-2 mt-8 text-xs text-sage-500">
                 {['8 reasoning tools', 'Any CSV or Excel', 'Seconds to first insight', 'Voice in & out'].map(s => (
                   <span key={s} className="inline-flex items-center gap-1.5">
                     <span className="w-1.5 h-1.5 rounded-full" style={{ background: LEAF }} /> {s}
@@ -236,7 +240,7 @@ export default function Landing({ onSessionStart }) {
                   </div>
                   <div className="text-xs font-semibold mb-1" style={{ color: LEAF }}>Step {i + 1}</div>
                   <div className="text-base font-medium text-sage-700 mb-2">{s.title}</div>
-                  <div className="text-sm text-sage-400 leading-relaxed max-w-xs">{s.desc}</div>
+                  <div className="text-sm text-sage-500 leading-relaxed max-w-xs">{s.desc}</div>
                 </div>
               </Reveal>
             ))}
@@ -251,7 +255,7 @@ export default function Landing({ onSessionStart }) {
             <div>
               <div className="text-xs font-semibold tracking-widest uppercase mb-3" style={{ color: LEAF }}>Features</div>
               <h2 className="font-serif-display text-3xl md:text-4xl text-sage-700 mb-3">Built like an analyst, not a dashboard</h2>
-              <p className="text-sage-400 max-w-lg">Everything Sage does is in service of one thing: making sure you have what you need to decide well.</p>
+              <p className="text-sage-500 max-w-lg">Everything Sage does is in service of one thing: making sure you have what you need to decide well.</p>
             </div>
             <div className="hidden sm:flex items-center gap-2 shrink-0">
               <button onClick={() => scrollCarousel(-1)} aria-label="Scroll features left" className="w-9 h-9 rounded-full border border-sage-200 flex items-center justify-center text-sage-500 hover:bg-sage-50 transition">
@@ -281,7 +285,7 @@ export default function Landing({ onSessionStart }) {
                       <f.icon size={20} strokeWidth={1.75} style={{ color: i % 2 === 0 ? '#534AB7' : LEAF }} />
                     </div>
                     <div className="text-sm font-semibold text-sage-700 mb-1.5">{f.title}</div>
-                    <div className="text-sm text-sage-400 leading-relaxed">{f.desc}</div>
+                    <div className="text-sm text-sage-500 leading-relaxed">{f.desc}</div>
                   </div>
                 </Reveal>
               ))}
@@ -348,7 +352,7 @@ export default function Landing({ onSessionStart }) {
       <section className="px-6 py-20 md:py-28 text-center">
         <Reveal>
           <h2 className="font-serif-display text-3xl md:text-4xl text-sage-700 mb-4">Bring your data. Ask anything.</h2>
-          <p className="text-sage-400 mb-8 max-w-md mx-auto">No signup friction, no sample-data theater. Drop a real file and see what Sage finds in seconds.</p>
+          <p className="text-sage-500 mb-8 max-w-md mx-auto">No signup friction, no sample-data theater. Drop a real file and see what Sage finds in seconds.</p>
           <button
             onClick={() => inputRef.current?.click()}
             className="btn-shine inline-flex items-center gap-2 text-sm font-medium px-7 py-3.5 rounded-full bg-sage-700 text-white hover:bg-sage-600 transition shadow-lg shadow-sage-700/20"
@@ -359,7 +363,7 @@ export default function Landing({ onSessionStart }) {
       </section>
 
       {/* Footer */}
-      <footer className="px-6 py-8 border-t border-sage-200/40 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-sage-400">
+      <footer className="px-6 py-8 border-t border-sage-200/40 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-sage-500">
         <div className="flex items-center gap-2">
           <span className="text-base">🌿</span>
           <span className="font-medium text-sage-600">Sage</span>
