@@ -9,17 +9,18 @@ import pandas as pd
 
 from column_types import classify_column
 
-# A category is framed as "dominant" only once it both (a) holds an outright
-# majority of records and (b) is meaningfully larger than an even split would
-# give it — so "Male" at 52% of a 2-value Gender column (even split = 50%)
-# isn't misreported as "leading", but "MediCorp" at 60% of a 4-value
-# Insurance Provider column (even split = 25%) is.
-DOMINANCE_MIN_SHARE = 50       # % — must be an outright majority
-DOMINANCE_VS_EVEN_SPLIT = 1.5  # x — and this many times the even-split share
+# A category is framed as "leads" only once it holds a clear majority —
+# a 50/50 (or 55/45) split has no "leader".
+DOMINANCE_THRESHOLD = 60  # %
 
 # A period-over-period shift smaller than this is normal noise, not a
 # trend worth flagging.
 TREND_MATERIALITY = 10  # %
+
+# If the most recent period has fewer than this fraction of the median
+# record count of prior periods, it's likely a partial/in-progress period
+# and shouldn't be treated as a real data point for trend math.
+PARTIAL_PERIOD_THRESHOLD = 0.6  # x median of prior periods
 
 
 def build_briefing(df: pd.DataFrame) -> dict:
@@ -67,38 +68,23 @@ def build_briefing(df: pd.DataFrame) -> dict:
                 noticed.append(f"The mean {col_label} is {ratio:.1f}x the median — a skewed distribution that can distort averages.")
 
     # Finding 2 — category concentration (category only, not binary_outcome)
-    # Only framed as a "dominance" finding once the top category clears
+    # Only framed as a "leads" finding once the top category clears
     # DOMINANCE_THRESHOLD; an even split is reported neutrally instead.
+    # Category share facts never drive the Risk/Opportunity cards — those
+    # are reserved for metric-column findings — so this only ever writes
+    # to "noticed" (plus a "finding" entry when genuinely dominant).
     if category_cols:
         col = category_cols[0]
         vc = df[col].value_counts(dropna=True)
         top_pct = vc.iloc[0]/len(df)*100
-        even_share = 100 / len(vc)
         col_label = col.replace("_", " ").title()
-        if top_pct >= DOMINANCE_MIN_SHARE and top_pct >= DOMINANCE_VS_EVEN_SPLIT * even_share:
+        if top_pct >= DOMINANCE_THRESHOLD:
             findings.append({
                 "title": f"{vc.index[0]} leads {col_label} at {top_pct:.0f}%",
                 "detail": f"The top {col_label} represents {top_pct:.0f}% of all records. The remaining {len(vc)-1} categories share {100-top_pct:.0f}%.",
                 "type": "concentration"
             })
             noticed.append(f"{vc.index[0]} represents {top_pct:.0f}% of all {col_label} records.")
-            # Opportunity is restricted to metric columns — it should describe
-            # how a real business quantity behaves in the smallest segment,
-            # not just that segment's share of records.
-            if metric_cols:
-                metric_col = metric_cols[0]
-                smallest_cat = vc.index[-1]
-                seg_vals = pd.to_numeric(df.loc[df[col] == smallest_cat, metric_col], errors="coerce")
-                overall_vals = pd.to_numeric(df[metric_col], errors="coerce")
-                seg_mean, overall_mean = seg_vals.mean(), overall_vals.mean()
-                metric_label = metric_col.replace("_", " ").title()
-                opportunity = (
-                    f"{smallest_cat} is only {vc.iloc[-1]/len(df)*100:.1f}% of records but averages "
-                    f"{seg_mean:,.0f} {metric_label} (overall avg {overall_mean:,.0f}) — "
-                    f"a segment with room to grow."
-                )
-            else:
-                noticed.append(f"{vc.index[-1]} is the smallest {col_label} segment at {vc.iloc[-1]/len(df)*100:.1f}% of records.")
         else:
             noticed.append(f"{col_label} is fairly evenly distributed across {len(vc)} categories — {vc.index[0]} is the largest at {top_pct:.0f}%.")
 
@@ -118,23 +104,45 @@ def build_briefing(df: pd.DataFrame) -> dict:
             metric = next((c for c in metric_cols if any(k in c.lower() for k in ['sales','revenue','profit'])), metric_cols[0])
             ts = df.copy()
             ts[date_col] = pd.to_datetime(ts[date_col], errors="coerce")
-            ts = ts.dropna(subset=[date_col]).set_index(date_col)[metric].resample("ME").sum()
-            if len(ts) >= 4:
-                first_half = ts.iloc[:len(ts)//2].mean()
-                second_half = ts.iloc[len(ts)//2:].mean()
+            ts = ts.dropna(subset=[date_col]).set_index(date_col)[metric]
+            grouped = ts.resample("ME")
+            values, counts = grouped.sum(), grouped.count()
+
+            # Drop a partial trailing period (e.g. the current, still-filling
+            # month) so it doesn't masquerade as a real drop/spike.
+            if len(values) >= 2:
+                prior_median = counts.iloc[:-1].median()
+                if prior_median > 0 and counts.iloc[-1] < PARTIAL_PERIOD_THRESHOLD * prior_median:
+                    values = values.iloc[:-1]
+
+            if len(values) >= 4:
+                first_half = values.iloc[:len(values)//2].mean()
+                second_half = values.iloc[len(values)//2:].mean()
                 pct_change = (second_half - first_half)/max(first_half,1)*100
                 if abs(pct_change) >= TREND_MATERIALITY:
                     direction = "up" if pct_change > 0 else "down"
+                    trend_word = "upward" if pct_change > 0 else "downward"
                     metric_label = metric.replace("_", " ").title()
                     findings.append({
                         "title": f"{metric_label} trended {direction} {abs(pct_change):.0f}% over the period",
-                        "detail": f"First half average: {first_half:,.0f}. Second half average: {second_half:,.0f}. The trend is {'positive' if pct_change > 0 else 'concerning'} and consistent.",
+                        "detail": f"First half average: {first_half:,.0f}. Second half average: {second_half:,.0f}. The trend is {trend_word} and consistent.",
                         "type": "trend"
                     })
                     noticed.append(f"{metric_label} in the second half of the dataset is {abs(pct_change):.0f}% {'higher' if pct_change > 0 else 'lower'} than the first half — a structural shift worth investigating.")
                     action = f"Investigate what changed at the midpoint of the {date_col.replace('_',' ')} range — the {abs(pct_change):.0f}% shift suggests an external event or strategic change."
         except Exception:
             pass
+
+    # Negative-value check — additive metrics shouldn't normally go negative;
+    # flag it for the user to confirm whether it's expected (refunds/adjustments)
+    # or a data quality issue.
+    for col in metric_cols:
+        s = pd.to_numeric(df[col], errors="coerce").dropna()
+        negatives = s[s < 0]
+        if len(negatives) > 0:
+            pct = len(negatives)/len(s)*100
+            col_label = col.replace("_", " ").title()
+            noticed.append(f"{col_label} contains {len(negatives):,} negative values ({pct:.1f}%) — verify whether these are adjustments/refunds or data errors.")
 
     # Recommended action: only suggest correlations between metric/rate_or_score pairs
     if not action and len(corr_eligible) >= 2:

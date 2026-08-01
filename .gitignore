@@ -6,6 +6,8 @@ node_modules/
 dist/
 .DS_Store
 backend/sage_data.db
+backend/sage_meta.db
+backend/session_data/
 backend/.env
 backend/.venv/
 backend/__pycache__/

@@ -9,21 +9,31 @@ to ground every answer in tool calls.
 from __future__ import annotations
 
 import os
+import sqlite3
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 
-from tools import (
-    profile_data,
-    get_schema,
-    run_sql,
-    value_counts,
-    top_n,
-    time_series,
-    correlations,
-    anomaly_detect,
-)
+from tools import make_session_tools, SessionData, SESSION_DATA_DIR
+
+# Conversation memory (LangGraph's checkpointer) is now backed by a SQLite
+# file instead of the in-memory MemorySaver, so a user's chat history
+# survives a backend restart. One shared connection/saver for the whole
+# process — LangGraph partitions checkpoints internally by thread_id (we use
+# session_id as the thread_id), so sharing one file across all sessions is
+# safe and avoids opening a connection per session.
+_CHECKPOINT_DB_PATH = os.path.join(SESSION_DATA_DIR, "checkpoints.db")
+_checkpointer: SqliteSaver | None = None
+
+
+def _get_checkpointer() -> SqliteSaver:
+    global _checkpointer
+    if _checkpointer is None:
+        conn = sqlite3.connect(_CHECKPOINT_DB_PATH, check_same_thread=False)
+        _checkpointer = SqliteSaver(conn)
+        _checkpointer.setup()
+    return _checkpointer
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
@@ -112,7 +122,10 @@ FORMATTING RULES: Never use ** or * for bold or italic. Never use # for headers.
 """
 
 
-def build_agent():
+def build_agent(session: SessionData):
+    """Build an agent bound to one session's data. Every session gets its
+    own tool instances (via make_session_tools) and its own checkpointer, so
+    one user's conversation/thread can never see another user's dataset."""
     api_key = None
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     try:
@@ -143,18 +156,9 @@ def build_agent():
 
     return create_react_agent(
         model=llm,
-        tools=[
-            profile_data,
-            get_schema,
-            run_sql,
-            value_counts,
-            top_n,
-            time_series,
-            correlations,
-            anomaly_detect,
-        ],
+        tools=make_session_tools(session),
         prompt=SYSTEM_PROMPT,
-        checkpointer=MemorySaver(),
+        checkpointer=_get_checkpointer(),
     )
 
 
@@ -173,31 +177,16 @@ def _content_to_str(content) -> str:
     return str(content) if content else ""
 
 
-# Global agent instance and thread id
-_agent = None
-_thread_id = "default"
-
-
-def get_or_build_agent():
-    global _agent
-    if _agent is None:
-        _agent = build_agent()
-    return _agent
-
-
-def set_thread_id(thread_id: str):
-    global _thread_id
-    _thread_id = thread_id
-
-
-def run_agent_with_trace(question: str) -> dict:
+def run_agent_with_trace(agent, question: str, thread_id: str = "default") -> dict:
     """
-    Invoke the agent and return:
+    Invoke `agent` (the session's own agent, from build_agent) and return:
     { content: str, trace: [{tool, args, result}] }
+
+    `thread_id` should be the session_id, so LangGraph's checkpointer keeps
+    each session's conversation memory separate.
     """
     try:
-        agent = get_or_build_agent()
-        config = {"configurable": {"thread_id": _thread_id}}
+        config = {"configurable": {"thread_id": thread_id}}
         result = agent.invoke(
             {"messages": [{"role": "user", "content": question}]},
             config=config,

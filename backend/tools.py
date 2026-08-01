@@ -4,6 +4,10 @@ tools.py - Sage data layer (dataset-agnostic)
 Loads ANY CSV/Excel into SQLite + a pandas DataFrame, profiles columns
 generically, exposes LangChain tools the agent uses to answer questions
 about whatever the user uploaded. No hardcoded business columns.
+
+State is scoped per-session (SessionData) rather than at module level, so
+concurrent users each get their own dataframe, SQLite table, and profile
+cache instead of silently sharing (and overwriting) one global dataset.
 """
 
 from __future__ import annotations
@@ -18,13 +22,33 @@ import numpy as np
 import pandas as pd
 from langchain_core.tools import tool
 
-# Module state
-_df: Optional[pd.DataFrame] = None
-_db_path: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sage_data.db")
-_table_name: str = "data"
-_cleaning_report: List[str] = []
-_profile_cache: Optional[Dict[str, Any]] = None
-_dataset_name: Optional[str] = None
+
+# ============================================================================
+# Per-session state
+# ============================================================================
+# Each session's cleaned data lives in its own SQLite file under this
+# directory (next to the code, NOT the OS temp dir) so it survives a
+# process restart. Add this directory to .gitignore; on a host with an
+# ephemeral filesystem (e.g. a fresh container redeploy with no attached
+# volume) it still won't survive a full redeploy — that needs a persistent
+# volume mounted at this path.
+SESSION_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session_data")
+os.makedirs(SESSION_DATA_DIR, exist_ok=True)
+
+
+class SessionData:
+    """Holds one uploaded dataset's cleaned dataframe, SQLite table, and
+    cached profile. One instance per session_id — never shared across
+    sessions/users, so concurrent uploads can't clobber each other."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.df: Optional[pd.DataFrame] = None
+        self.db_path: str = os.path.join(SESSION_DATA_DIR, f"sage_{session_id}.db")
+        self.table_name: str = "data"
+        self.cleaning_report: List[str] = []
+        self.profile_cache: Optional[Dict[str, Any]] = None
+        self.dataset_name: Optional[str] = None
 
 
 # ============================================================================
@@ -107,7 +131,7 @@ def clean_dataframe(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
 
     converted_numeric: List[str] = []
     for col in df.columns:
-        if df[col].dtype == object and _looks_numeric(df[col]):
+        if pd.api.types.is_string_dtype(df[col]) and _looks_numeric(df[col]):
             df[col] = pd.to_numeric(
                 df[col].astype(str).str.replace(_NUM_STRIP_RE, "", regex=True),
                 errors="coerce",
@@ -119,14 +143,15 @@ def clean_dataframe(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
 
     parsed_dates: List[str] = []
     for col in df.columns:
-        if df[col].dtype == object and _looks_datetime(df[col]):
+        if pd.api.types.is_string_dtype(df[col]) and _looks_datetime(df[col]):
             df[col] = pd.to_datetime(df[col], errors="coerce")
             parsed_dates.append(col)
     if parsed_dates:
         changes.append(f"Parsed {len(parsed_dates)} date column(s): " + ", ".join(parsed_dates))
 
-    for col in df.select_dtypes(include=["object"]).columns:
-        df[col] = df[col].astype(str).str.strip()
+    for col in df.columns:
+        if pd.api.types.is_string_dtype(df[col]):
+            df[col] = df[col].astype(str).str.strip()
 
     return df, changes
 
@@ -147,25 +172,45 @@ _NAME_COL_RE = re.compile(
     re.I
 )
 
+# Numeric columns whose NAME marks them as a label/location/identifier tag
+# (which room, which zip code, which gate) rather than a measurement —
+# these repeat by nature, so uniqueness doesn't apply to them.
+_ID_LABEL_WORDS = ("room", "zip", "postal", "phone", "floor", "seat", "gate", "bed", "ward", "label")
+
 
 def _looks_like_sequence(s: pd.Series) -> bool:
-    """True if values are essentially a contiguous sequence (e.g. 1,2,3...)."""
+    """True if values are essentially a contiguous, near-unique sequence
+    (e.g. 1,2,3... — an auto-increment ID)."""
     vals = pd.to_numeric(s, errors="coerce").dropna()
     if len(vals) < 20:
+        return False
+    # A real ID sequence has little to no repetition. Without this check,
+    # any ordinary numeric column with a lot of duplicate values (Age,
+    # Length of Stay, ratings, etc.) sorts into long runs of diff == 0,
+    # which would otherwise dominate the mode and get misread as "sequential".
+    if vals.nunique() < 0.9 * len(vals):
         return False
     diffs = vals.sort_values().diff().dropna()
     if diffs.empty:
         return False
-    return float((diffs == diffs.mode().iloc[0]).mean()) > 0.9
+    mode_diff = diffs.mode().iloc[0]
+    # A sequence steps forward by a small constant amount. A mode diff of 0
+    # means the column is full of duplicates sitting next to each other once
+    # sorted — that's the opposite of an incrementing sequence.
+    if mode_diff <= 0:
+        return False
+    return float((diffs == mode_diff).mean()) > 0.9
 
 
 def _classify_columns(df: pd.DataFrame) -> Dict[str, List[str]]:
     """Classify columns into numeric / categorical / datetime / text / id.
 
-    A column is flagged as 'id' only when its NAME looks like an identifier
-    (contains id/code/key/uuid/guid/sku) AND uniqueness is high, OR when its
-    values form a near-perfect sequence. Random high-uniqueness numerics
-    like Salary or Revenue stay as 'numeric'.
+    A column is flagged as 'id' when its NAME looks like an identifier
+    (contains id/code/key/uuid/guid/sku) AND uniqueness is high, when its
+    name marks it as a label/location tag (room, zip, phone, ...) regardless
+    of uniqueness, or when its values form a near-perfect increasing
+    sequence. Random high-uniqueness numerics like Salary or Revenue stay
+    as 'numeric'.
     """
     out: Dict[str, List[str]] = {
         "numeric": [], "datetime": [], "categorical": [], "text": [], "id": [],
@@ -178,8 +223,9 @@ def _classify_columns(df: pd.DataFrame) -> Dict[str, List[str]]:
         elif pd.api.types.is_numeric_dtype(s):
             unique_ratio = s.nunique(dropna=True) / n
             name_looks_id = bool(_ID_NAME_RE.search(str(col)))
+            name_looks_label = any(w in str(col).lower() for w in _ID_LABEL_WORDS)
             is_sequence = pd.api.types.is_integer_dtype(s) and _looks_like_sequence(s)
-            if (name_looks_id and unique_ratio > 0.9) or is_sequence:
+            if (name_looks_id and unique_ratio > 0.9) or name_looks_label or is_sequence:
                 out["id"].append(col)
             else:
                 out["numeric"].append(col)
@@ -193,7 +239,10 @@ def _classify_columns(df: pd.DataFrame) -> Dict[str, List[str]]:
     return out
 
 
-def build_profile(df: pd.DataFrame) -> Dict[str, Any]:
+def build_profile(df: pd.DataFrame, cleaning_report: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Pure function of `df` (plus the cleaning-change log that produced it,
+    if any) — no hidden module/session state, so it's safe to call from
+    anywhere with any dataframe."""
     classes = _classify_columns(df)
 
     numeric_summary: Dict[str, Any] = {}
@@ -242,216 +291,200 @@ def build_profile(df: pd.DataFrame) -> Dict[str, Any]:
         "categorical_summary": categorical_summary,
         "datetime_summary": datetime_summary,
         "missing_per_column": {c: int(df[c].isna().sum()) for c in df.columns},
-        "cleaning_applied": list(_cleaning_report),
+        "cleaning_applied": list(cleaning_report or []),
     }
 
 
 # ============================================================================
-# Public load / accessor API
+# Public load API
 # ============================================================================
-def load_dataframe(df: pd.DataFrame, dataset_name: str = "dataset") -> List[str]:
-    """Cleans and indexes the dataframe. Returns human-readable changes."""
-    global _df, _cleaning_report, _profile_cache, _dataset_name
-
+def load_dataframe(session: SessionData, df: pd.DataFrame, dataset_name: str = "dataset") -> List[str]:
+    """Cleans and indexes `df` into `session` (in place). Returns
+    human-readable changes. Every session gets its own SQLite file
+    (`session.db_path`), so concurrent sessions never share a table."""
     df, changes = clean_dataframe(df)
-    _df = df
-    _cleaning_report = changes
-    _dataset_name = dataset_name
-    _profile_cache = build_profile(df)
+    session.df = df
+    session.cleaning_report = changes
+    session.dataset_name = dataset_name
+    session.profile_cache = build_profile(df, cleaning_report=changes)
 
     df_sql = df.copy()
     for c in df_sql.columns:
         if pd.api.types.is_datetime64_any_dtype(df_sql[c]):
             df_sql[c] = df_sql[c].astype(str)
 
-    conn = sqlite3.connect(_db_path)
-    df_sql.to_sql(_table_name, conn, if_exists="replace", index=False)
+    conn = sqlite3.connect(session.db_path)
+    df_sql.to_sql(session.table_name, conn, if_exists="replace", index=False)
     conn.close()
 
     return changes
 
 
-def get_df() -> Optional[pd.DataFrame]:
-    return _df
-
-
-def get_profile() -> Optional[Dict[str, Any]]:
-    return _profile_cache
-
-
-def get_dataset_name() -> Optional[str]:
-    return _dataset_name
-
-
-def get_cleaning_report() -> List[str]:
-    return list(_cleaning_report)
-
-
 # ============================================================================
-# LangChain tools
+# LangChain tools — bound to one session
 # ============================================================================
-@tool
-def profile_data(input: str = "") -> str:
-    """Profile the loaded dataset. Returns JSON with columns, types
-    (numeric/categorical/datetime/text/id), summary stats, top categories,
-    missing-value counts, and cleaning applied. Always call this FIRST."""
-    if _df is None:
-        return "No data loaded yet."
-    return json.dumps(build_profile(_df), indent=2, default=str)
+def make_session_tools(session: SessionData) -> list:
+    """Build a fresh set of LangChain tools bound to `session` via closure.
+    Each session gets its own tool instances, so the agent can never read or
+    query another session's dataframe or SQLite table."""
 
+    @tool
+    def profile_data(input: str = "") -> str:
+        """Profile the loaded dataset. Returns JSON with columns, types
+        (numeric/categorical/datetime/text/id), summary stats, top categories,
+        missing-value counts, and cleaning applied. Always call this FIRST."""
+        if session.df is None:
+            return "No data loaded yet."
+        return json.dumps(build_profile(session.df, session.cleaning_report), indent=2, default=str)
 
-@tool
-def get_schema(input: str = "") -> str:
-    """Lightweight schema view: column name, type, one example value.
-    Use this before writing SQL."""
-    if _df is None:
-        return "No data loaded yet."
-    lines = [f"Table: {_table_name}", "Columns:"]
-    for col, dtype in _df.dtypes.items():
-        sample = _df[col].dropna().iloc[0] if _df[col].notna().any() else "N/A"
-        sample_str = str(sample)
-        if len(sample_str) > 40:
-            sample_str = sample_str[:37] + "..."
-        lines.append(f"  - {col} ({dtype}) example: {sample_str}")
-    return "\n".join(lines)
+    @tool
+    def get_schema(input: str = "") -> str:
+        """Lightweight schema view: column name, type, one example value.
+        Use this before writing SQL."""
+        if session.df is None:
+            return "No data loaded yet."
+        lines = [f"Table: {session.table_name}", "Columns:"]
+        for col, dtype in session.df.dtypes.items():
+            sample = session.df[col].dropna().iloc[0] if session.df[col].notna().any() else "N/A"
+            sample_str = str(sample)
+            if len(sample_str) > 40:
+                sample_str = sample_str[:37] + "..."
+            lines.append(f"  - {col} ({dtype}) example: {sample_str}")
+        return "\n".join(lines)
 
+    @tool
+    def run_sql(query: str) -> str:
+        """Run a read-only SQL SELECT against the loaded dataset. Table is 'data'.
+        Returns at most 25 rows. Always call get_schema first to learn the column
+        names."""
+        if session.df is None:
+            return "No data loaded yet."
+        q = (query or "").strip().rstrip(";")
+        if not (q.upper().startswith("SELECT") or q.upper().startswith("WITH")):
+            return "Only SELECT/WITH queries are allowed."
+        try:
+            conn = sqlite3.connect(session.db_path)
+            result = pd.read_sql_query(q, conn)
+            conn.close()
+            if result.empty:
+                return "Query returned 0 rows."
+            return result.head(25).to_string(index=False)
+        except Exception as e:
+            return f"SQL Error: {e}"
 
-@tool
-def run_sql(query: str) -> str:
-    """Run a read-only SQL SELECT against the loaded dataset. Table is 'data'.
-    Returns at most 25 rows. Always call get_schema first to learn the column
-    names."""
-    if _df is None:
-        return "No data loaded yet."
-    q = (query or "").strip().rstrip(";")
-    if not (q.upper().startswith("SELECT") or q.upper().startswith("WITH")):
-        return "Only SELECT/WITH queries are allowed."
-    try:
-        conn = sqlite3.connect(_db_path)
-        result = pd.read_sql_query(q, conn)
-        conn.close()
-        if result.empty:
-            return "Query returned 0 rows."
-        return result.head(25).to_string(index=False)
-    except Exception as e:
-        return f"SQL Error: {e}"
+    @tool
+    def value_counts(column: str, top_n: int = 10) -> str:
+        """Most common values for a categorical column and their counts.
+        Use for 'most common X' or 'breakdown of X'."""
+        if session.df is None:
+            return "No data loaded yet."
+        if column not in session.df.columns:
+            return f"Column '{column}' not found. Available: {list(session.df.columns)}"
+        vc = session.df[column].value_counts(dropna=True).head(top_n)
+        return vc.to_string()
 
+    @tool
+    def top_n(group_by: str, metric: str, n: int = 5, ascending: bool = False) -> str:
+        """Group by `group_by`, sum `metric`, return top (or bottom) N.
+        ascending=True returns the bottom N. Use for 'top X by Y' questions."""
+        if session.df is None:
+            return "No data loaded yet."
+        if group_by not in session.df.columns:
+            return f"Group column '{group_by}' not found."
+        if metric not in session.df.columns:
+            return f"Metric column '{metric}' not found."
+        s = pd.to_numeric(session.df[metric], errors="coerce")
+        if s.isna().all():
+            return f"Metric '{metric}' is not numeric."
+        grouped = s.groupby(session.df[group_by]).sum().sort_values(ascending=ascending).head(n)
+        return grouped.round(2).to_string()
 
-@tool
-def value_counts(column: str, top_n: int = 10) -> str:
-    """Most common values for a categorical column and their counts.
-    Use for 'most common X' or 'breakdown of X'."""
-    if _df is None:
-        return "No data loaded yet."
-    if column not in _df.columns:
-        return f"Column '{column}' not found. Available: {list(_df.columns)}"
-    vc = _df[column].value_counts(dropna=True).head(top_n)
-    return vc.to_string()
+    @tool
+    def time_series(date_column: str, metric: str, freq: str = "ME") -> str:
+        """Aggregate `metric` over time using `date_column`.
+        freq: D=day, W=week, ME=month-end, QE=quarter, YE=year."""
+        if session.df is None:
+            return "No data loaded yet."
+        if date_column not in session.df.columns:
+            return f"Date column '{date_column}' not found."
+        if metric not in session.df.columns:
+            return f"Metric '{metric}' not found."
+        dates = pd.to_datetime(session.df[date_column], errors="coerce")
+        vals = pd.to_numeric(session.df[metric], errors="coerce")
+        df_t = pd.DataFrame({"d": dates, "v": vals}).dropna()
+        if df_t.empty:
+            return "No valid date+metric pairs."
+        # Map old pandas freq aliases to new ones
+        freq_map = {"Q": "QE", "M": "ME", "A": "YE", "Y": "YE"}
+        freq = freq_map.get(freq.upper(), freq)
+        grouped = df_t.set_index("d")["v"].resample(freq).sum()
+        return grouped.round(2).to_string()
 
+    @tool
+    def correlations(threshold: float = 0.5) -> str:
+        """Pairs of numeric columns whose absolute correlation exceeds the threshold.
+        Useful for finding relationships in unfamiliar datasets."""
+        if session.df is None:
+            return "No data loaded yet."
+        num = session.df.select_dtypes(include=[np.number])
+        if num.shape[1] < 2:
+            return "Not enough numeric columns to correlate."
+        corr = num.corr().round(3)
+        pairs = []
+        for i in range(len(corr.columns)):
+            for j in range(i + 1, len(corr.columns)):
+                v = corr.iloc[i, j]
+                if pd.notna(v) and abs(v) >= threshold:
+                    pairs.append((corr.columns[i], corr.columns[j], float(v)))
+        pairs.sort(key=lambda x: -abs(x[2]))
+        if not pairs:
+            return f"No correlations above |{threshold}|."
+        return "\n".join(f"{a} <-> {b}: {v:+.2f}" for a, b, v in pairs[:20])
 
-@tool
-def top_n(group_by: str, metric: str, n: int = 5, ascending: bool = False) -> str:
-    """Group by `group_by`, sum `metric`, return top (or bottom) N.
-    ascending=True returns the bottom N. Use for 'top X by Y' questions."""
-    if _df is None:
-        return "No data loaded yet."
-    if group_by not in _df.columns:
-        return f"Group column '{group_by}' not found."
-    if metric not in _df.columns:
-        return f"Metric column '{metric}' not found."
-    s = pd.to_numeric(_df[metric], errors="coerce")
-    if s.isna().all():
-        return f"Metric '{metric}' is not numeric."
-    grouped = s.groupby(_df[group_by]).sum().sort_values(ascending=ascending).head(n)
-    return grouped.round(2).to_string()
-
-
-@tool
-def time_series(date_column: str, metric: str, freq: str = "ME") -> str:
-    """Aggregate `metric` over time using `date_column`.
-    freq: D=day, W=week, ME=month-end, QE=quarter, YE=year."""
-    if _df is None:
-        return "No data loaded yet."
-    if date_column not in _df.columns:
-        return f"Date column '{date_column}' not found."
-    if metric not in _df.columns:
-        return f"Metric '{metric}' not found."
-    dates = pd.to_datetime(_df[date_column], errors="coerce")
-    vals = pd.to_numeric(_df[metric], errors="coerce")
-    df_t = pd.DataFrame({"d": dates, "v": vals}).dropna()
-    if df_t.empty:
-        return "No valid date+metric pairs."
-    # Map old pandas freq aliases to new ones
-    freq_map = {"Q": "QE", "M": "ME", "A": "YE", "Y": "YE"}
-    freq = freq_map.get(freq.upper(), freq)
-    grouped = df_t.set_index("d")["v"].resample(freq).sum()
-    return grouped.round(2).to_string()
-
-
-@tool
-def correlations(threshold: float = 0.5) -> str:
-    """Pairs of numeric columns whose absolute correlation exceeds the threshold.
-    Useful for finding relationships in unfamiliar datasets."""
-    if _df is None:
-        return "No data loaded yet."
-    num = _df.select_dtypes(include=[np.number])
-    if num.shape[1] < 2:
-        return "Not enough numeric columns to correlate."
-    corr = num.corr().round(3)
-    pairs = []
-    for i in range(len(corr.columns)):
-        for j in range(i + 1, len(corr.columns)):
-            v = corr.iloc[i, j]
-            if pd.notna(v) and abs(v) >= threshold:
-                pairs.append((corr.columns[i], corr.columns[j], float(v)))
-    pairs.sort(key=lambda x: -abs(x[2]))
-    if not pairs:
-        return f"No correlations above |{threshold}|."
-    return "\n".join(f"{a} <-> {b}: {v:+.2f}" for a, b, v in pairs[:20])
-
-
-@tool
-def anomaly_detect(column: str) -> str:
-    """Detect outliers in a numeric column using the IQR method (Q1 - 1.5×IQR, Q3 + 1.5×IQR).
-    Use for 'anything unusual', 'outliers', 'spikes', 'what looks off'."""
-    if _df is None:
-        return "No data loaded yet."
-    if column not in _df.columns:
-        return f"Column '{column}' not found. Available: {list(_df.columns)}"
-    s = pd.to_numeric(_df[column], errors="coerce").dropna()
-    if s.empty:
-        return f"Column '{column}' has no numeric values."
-    q1, q3 = float(s.quantile(0.25)), float(s.quantile(0.75))
-    iqr = q3 - q1
-    lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-    col_numeric = pd.to_numeric(_df[column], errors="coerce")
-    mask = col_numeric.lt(lower) | col_numeric.gt(upper)
-    outliers = _df[mask]
-    count = int(len(outliers))
-    if count == 0:
+    @tool
+    def anomaly_detect(column: str) -> str:
+        """Detect outliers in a numeric column using the IQR method (Q1 - 1.5×IQR, Q3 + 1.5×IQR).
+        Use for 'anything unusual', 'outliers', 'spikes', 'what looks off'."""
+        if session.df is None:
+            return "No data loaded yet."
+        if column not in session.df.columns:
+            return f"Column '{column}' not found. Available: {list(session.df.columns)}"
+        s = pd.to_numeric(session.df[column], errors="coerce").dropna()
+        if s.empty:
+            return f"Column '{column}' has no numeric values."
+        q1, q3 = float(s.quantile(0.25)), float(s.quantile(0.75))
+        iqr = q3 - q1
+        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        col_numeric = pd.to_numeric(session.df[column], errors="coerce")
+        mask = col_numeric.lt(lower) | col_numeric.gt(upper)
+        outliers = session.df[mask]
+        count = int(len(outliers))
+        if count == 0:
+            return json.dumps({
+                "column": column, "outlier_count": 0,
+                "bounds": {"lower": round(lower, 4), "upper": round(upper, 4)},
+                "message": "No outliers found.",
+            })
         return json.dumps({
-            "column": column, "outlier_count": 0,
+            "column": column,
+            "outlier_count": count,
             "bounds": {"lower": round(lower, 4), "upper": round(upper, 4)},
-            "message": "No outliers found.",
-        })
-    return json.dumps({
-        "column": column,
-        "outlier_count": count,
-        "bounds": {"lower": round(lower, 4), "upper": round(upper, 4)},
-        "outlier_rows": json.loads(
-            outliers.head(20).to_json(orient="records", default_handler=str)
-        ),
-    }, indent=2, default=str)
+            "outlier_rows": json.loads(
+                outliers.head(20).to_json(orient="records", default_handler=str)
+            ),
+        }, indent=2, default=str)
+
+    return [profile_data, get_schema, run_sql, value_counts, top_n, time_series, correlations, anomaly_detect]
 
 
 # ============================================================================
 # UI helper
 # ============================================================================
-def quick_prompts_for_dataset() -> List[str]:
-    """Generate dataset-aware quick prompts using the actual columns."""
-    if _df is None or _profile_cache is None:
+def quick_prompts_for_dataset(session: SessionData) -> List[str]:
+    """Generate dataset-aware quick prompts using the actual columns of `session`."""
+    if session.df is None or session.profile_cache is None:
         return []
-    classes = _profile_cache["classes"]
+    classes = session.profile_cache["classes"]
     prompts: List[str] = ["Give me an overview of this dataset"]
 
     # Exclude ID columns from metric suggestions

@@ -167,19 +167,38 @@ function Dashboard({ session, mode }) {
         ))}
       </div>
 
-      {data.timeseries && (
-        <ChartCard title={data.timeseries.title} onExplain={() => explainChart(data.timeseries.title, data.timeseries.data)}>
-          <ResponsiveContainer width="100%" height={220}>
-            <LineChart data={data.timeseries.data}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(200,168,233,0.2)" />
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#afa9ec' }} interval="preserveStartEnd" />
-              <YAxis tickFormatter={fmt} tick={{ fontSize: 10, fill: '#afa9ec' }} width={60} />
-              <Tooltip formatter={fmt} contentStyle={{ background: 'rgba(255,255,255,0.95)', border: '0.5px solid rgba(200,168,233,0.4)', borderRadius: '8px', fontSize: '12px' }} />
-              <Line type="monotone" dataKey="value" stroke="#7F77DD" strokeWidth={2.5} dot={{ fill: 'white', stroke: '#7F77DD', strokeWidth: 2, r: 4 }} />
-            </LineChart>
-          </ResponsiveContainer>
-        </ChartCard>
-      )}
+      {data.timeseries && (() => {
+        const tsData = data.timeseries.data
+        const lastIdx = tsData.length - 1
+        const hasPartial = lastIdx >= 1 && tsData[lastIdx]?.partial
+        // Render the last period as a dashed/faded segment when it's
+        // partial (e.g. an in-progress month) so it isn't read as a real
+        // drop. The solid line stops one point early; a second, dashed
+        // line connects the last two points.
+        const chartData = hasPartial
+          ? tsData.map((d, idx) => ({
+              ...d,
+              partialValue: idx >= lastIdx - 1 ? d.value : null,
+              value: idx === lastIdx ? null : d.value,
+            }))
+          : tsData
+        return (
+          <ChartCard title={data.timeseries.title} onExplain={() => explainChart(data.timeseries.title, tsData)}>
+            <ResponsiveContainer width="100%" height={220}>
+              <LineChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(200,168,233,0.2)" />
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#afa9ec' }} interval="preserveStartEnd" />
+                <YAxis tickFormatter={fmt} tick={{ fontSize: 10, fill: '#afa9ec' }} width={60} />
+                <Tooltip formatter={fmt} contentStyle={{ background: 'rgba(255,255,255,0.95)', border: '0.5px solid rgba(200,168,233,0.4)', borderRadius: '8px', fontSize: '12px' }} />
+                <Line type="monotone" dataKey="value" stroke="#7F77DD" strokeWidth={2.5} dot={{ fill: 'white', stroke: '#7F77DD', strokeWidth: 2, r: 4 }} connectNulls={false} />
+                {hasPartial && (
+                  <Line type="monotone" dataKey="partialValue" stroke="#7F77DD" strokeWidth={2.5} strokeDasharray="5 5" strokeOpacity={0.4} dot={{ fill: 'white', stroke: '#7F77DD', strokeWidth: 2, r: 4, opacity: 0.4 }} connectNulls={false} legendType="none" />
+                )}
+              </LineChart>
+            </ResponsiveContainer>
+          </ChartCard>
+        )
+      })()}
 
       {data.bars?.map((chart, i) => (
         <ChartCard key={i} title={chart.title} onExplain={() => explainChart(chart.title, chart.data)}>
@@ -355,10 +374,14 @@ function Investigations({ session }) {
   )
 }
 
-export default function Product({ session, onReset }) {
+export default function Product({ session, onReset, onOpenHistory }) {
   const [tab, setTab] = useState('dashboard')
   const [mode, setMode] = useState('executive')
-  const [messages, setMessages] = useState([])
+  // Reopened reports arrive with their past Q&A in session.messages — hydrate
+  // the chat with it so history browsing doesn't lose the conversation.
+  const [messages, setMessages] = useState(() =>
+    (session.messages || []).map(m => ({ role: m.role, content: m.content, tools: m.tools_called }))
+  )
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [voiceState, setVoiceState] = useState('idle')
@@ -460,6 +483,9 @@ export default function Product({ session, onReset }) {
             <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block"></span>
             {session.rows?.toLocaleString()} rows · {session.filename}
           </div>
+          {onOpenHistory && (
+            <button onClick={onOpenHistory} className="text-xs text-sage-400 hover:text-sage-600 transition">Past reports</button>
+          )}
           <button onClick={onReset} className="text-xs text-sage-400 hover:text-sage-600 transition">← New dataset</button>
         </div>
       </div>

@@ -30,13 +30,15 @@ def classify_column(s: pd.Series) -> str:
         if name_stripped == "id" or name_stripped.endswith("id"):
             return "id"
         # 1c. Other id-like name words with moderate-to-high uniqueness
-        id_words = ["number", "code", "key", "index"]
+        id_words = ["code", "key", "index"]
         if any(w in name for w in id_words) and nunique >= 0.5 * n:
             return "id"
-        # 1d. Location/label identifiers — these tag a record (which room,
-        #     which class label) rather than measure it, regardless of how
-        #     many distinct values repeat (e.g. "Room Number", "Label")
-        id_name_words = ["room", "bed", "ward", "label"]
+        # 1d. Label/location/identifier numbers — these tag a record (which
+        #     room, which zip code, which gate) rather than measure it,
+        #     regardless of how many distinct values repeat
+        #     (e.g. "Room Number", "Zip Code", "Label")
+        id_name_words = ["room", "number", "zip", "postal", "phone",
+                         "floor", "seat", "gate", "bed", "ward", "label"]
         if any(w in name for w in id_name_words):
             return "id"
 

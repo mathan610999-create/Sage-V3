@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import axios from 'axios'
 import {
   Mic, Brain, MessageSquareText, LineChart as LineChartIcon, FileSpreadsheet,
-  Sparkles, UploadCloud, ArrowRight, Volume2, Database, Waves, ChevronLeft, ChevronRight,
+  Sparkles, UploadCloud, ArrowRight, Volume2, Database, Waves, ChevronLeft, ChevronRight, Clock,
 } from 'lucide-react'
 import {
   BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell,
@@ -82,7 +82,7 @@ const STEPS = [
   { icon: Volume2, title: 'Ask, and listen', desc: 'Type or speak a follow-up. Sage answers out loud, with the "why" included.' },
 ]
 
-export default function Landing({ onSessionStart }) {
+export default function Landing({ onSessionStart, onOpenHistory }) {
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState(null)
   const inputRef = useRef()
@@ -128,12 +128,20 @@ export default function Landing({ onSessionStart }) {
           <button onClick={() => scrollTo('features')} className="hover:text-sage-700 transition">Features</button>
           <button onClick={() => scrollTo('philosophy')} className="hover:text-sage-700 transition">Philosophy</button>
         </div>
-        <button
-          onClick={() => inputRef.current?.click()}
-          className="btn-shine text-xs font-medium px-4 py-2 rounded-full bg-sage-700 text-white hover:bg-sage-600 transition shadow-sm"
-        >
-          Try Sage free
-        </button>
+        <div className="flex items-center gap-2.5">
+          <button
+            onClick={onOpenHistory}
+            className="inline-flex items-center gap-1.5 text-xs font-medium px-3.5 py-2 rounded-full border border-sage-200 text-sage-500 hover:bg-sage-50 hover:text-sage-700 transition"
+          >
+            <Clock size={13} /> <span className="hidden sm:inline">Past reports</span>
+          </button>
+          <button
+            onClick={() => inputRef.current?.click()}
+            className="btn-shine text-xs font-medium px-4 py-2 rounded-full bg-sage-700 text-white hover:bg-sage-600 transition shadow-sm"
+          >
+            Try Sage free
+          </button>
+        </div>
       </nav>
 
       {/* Hero */}
