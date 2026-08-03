@@ -390,9 +390,41 @@ export default function Product({ session, onReset, onOpenHistory }) {
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const bottomRef = useRef()
+  const [exporting, setExporting] = useState(false)
+  const [shareState, setShareState] = useState('idle') // idle | copied | error
 
   useEffect(() => { window._sessionId = session.session_id }, [session])
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
+
+  async function exportPdf() {
+    setExporting(true)
+    try {
+      const res = await axios.get(`${API}/report/${session.session_id}/pdf`, { responseType: 'blob' })
+      const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `sage-report-${(session.filename || 'dataset').replace(/\.[^.]+$/, '')}.pdf`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (e) {
+      alert('Could not generate the PDF — please try again.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  async function copyShareLink() {
+    const link = `${API}/report/${session.session_id}`
+    try {
+      await navigator.clipboard.writeText(link)
+      setShareState('copied')
+    } catch (e) {
+      setShareState('error')
+    }
+    setTimeout(() => setShareState('idle'), 2000)
+  }
 
   async function ask(question) {
     if (!question.trim()) return
@@ -461,7 +493,7 @@ export default function Product({ session, onReset, onOpenHistory }) {
   return (
     <div className="min-h-screen flex flex-col">
       {/* Topbar */}
-      <div className="flex items-center justify-between px-6 py-3 bg-white/70 backdrop-blur border-b border-sage-200/30 sticky top-0 z-10">
+      <div className="flex items-center justify-between flex-wrap gap-y-2 px-6 py-3 bg-white/70 backdrop-blur border-b border-sage-200/30 sticky top-0 z-10">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-sage-200 to-rose-sage flex items-center justify-center">🌿</div>
           <div>
@@ -469,7 +501,7 @@ export default function Product({ session, onReset, onOpenHistory }) {
             <div className="text-xs text-sage-400">Every dataset has a story. Sage tells it.</div>
           </div>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center flex-wrap gap-y-2 gap-x-3">
           {/* Mode toggle */}
           <div className="flex items-center gap-1 bg-sage-100/60 rounded-lg p-1">
             {['executive', 'analyst'].map(m => (
@@ -483,6 +515,13 @@ export default function Product({ session, onReset, onOpenHistory }) {
             <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block"></span>
             {session.rows?.toLocaleString()} rows · {session.filename}
           </div>
+          <button onClick={exportPdf} disabled={exporting}
+            className="text-xs text-sage-400 hover:text-sage-600 transition disabled:opacity-50">
+            {exporting ? 'Exporting…' : '⬇ Export PDF'}
+          </button>
+          <button onClick={copyShareLink} className="text-xs text-sage-400 hover:text-sage-600 transition">
+            {shareState === 'copied' ? '✓ Link copied' : shareState === 'error' ? 'Could not copy' : '🔗 Share'}
+          </button>
           {onOpenHistory && (
             <button onClick={onOpenHistory} className="text-xs text-sage-400 hover:text-sage-600 transition">Past reports</button>
           )}

@@ -14,7 +14,7 @@ from typing import Optional
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -426,6 +426,63 @@ def get_briefing(session_id: str):
 
         from briefing import build_briefing
         return build_briefing(df)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+# ── Report generation (PDF export + shareable read-only link) ──
+def _build_report_pieces(session_id: str):
+    """Shared setup for both report endpoints: the session's dataframe,
+    briefing, dashboard charts, and full chat history. Raises HTTPException
+    on any of the same conditions the other per-session endpoints do."""
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    df = session["session_data"].df
+    if df is None:
+        raise HTTPException(404, "No data loaded")
+
+    from briefing import build_briefing
+    from report import render_all_charts
+
+    meta = store.get_session_meta(session_id) or {
+        "filename": session["filename"], "rows": session["rows"], "cols": session["cols"],
+    }
+    briefing_data = build_briefing(df)
+    dash = dashboard_data(session_id)
+    messages = store.get_messages(session_id)
+    charts = render_all_charts(dash)
+    return meta, briefing_data, messages, charts
+
+@app.get("/report/{session_id}/pdf")
+def report_pdf(session_id: str):
+    try:
+        from report import generate_report_pdf
+        meta, briefing_data, messages, charts = _build_report_pieces(session_id)
+        pdf_bytes = generate_report_pdf(meta, briefing_data, messages, charts)
+        base = (meta.get("filename") or "dataset").rsplit(".", 1)[0]
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="sage-report-{base}.pdf"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+# Public, unauthenticated read-only view — "anyone with the link" per the
+# product decision. No session cookie/token is required; the session_id in
+# the URL is itself the access key, matching how /sessions/{id} already
+# works for resuming a report in the app.
+@app.get("/report/{session_id}")
+def report_html(session_id: str):
+    try:
+        from report import generate_report_html
+        meta, briefing_data, messages, charts = _build_report_pieces(session_id)
+        html = generate_report_html(meta, briefing_data, messages, charts)
+        return HTMLResponse(content=html)
     except HTTPException:
         raise
     except Exception as e:
