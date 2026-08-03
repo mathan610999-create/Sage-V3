@@ -21,7 +21,9 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional
 
-_META_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sage_meta.db")
+_SESSION_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "session_data")
+os.makedirs(_SESSION_DATA_DIR, exist_ok=True)
+_META_DB_PATH = os.path.join(_SESSION_DATA_DIR, "sage_meta.db")
 
 
 def _conn() -> sqlite3.Connection:
